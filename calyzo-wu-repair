@@ -1,0 +1,94 @@
+<#
+.DESCRIPTION
+    Répare les composants Windows Update de manière robuste (optimisé RMM).
+    Arrête les services, renomme les dossiers de cache (sécurité), et lance DISM/SFC.
+#>
+
+# Force l'exécution en tant qu'Administrateur
+#Requires -RunAsAdministrator
+
+$ProgressPreference = 'SilentlyContinue'
+
+Write-Host "--- Début de la procédure de réparation profonde Windows Update ---"
+
+# 1. Arrêt des services critiques avec gestion des blocages
+$Services = @("wuauserv", "bits", "cryptsvc", "appidsvc")
+foreach ($Service in $Services) {
+    $svc = Get-Service -Name $Service -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne 'Stopped') {
+        Write-Host "Arrêt du service : $Service..."
+        Stop-Service -Name $Service -Force -ErrorAction SilentlyContinue
+        
+        # Pause de 2 secondes
+        Start-Sleep -Seconds 2 
+        
+        # Si le service est toujours bloqué, on force l'arrêt du processus
+        $svc = Get-Service -Name $Service -ErrorAction SilentlyContinue
+        if ($svc.Status -ne 'Stopped') {
+            Write-Warning "Le service $Service refuse de s'arrêter. Arrêt forcé du processus..."
+            # Remplacement de WMI par CIM (plus moderne et compatible PowerShell 7+)
+            $ProcessId = (Get-CimInstance Win32_Service -Filter "Name='$Service'").ProcessId
+            if ($ProcessId) { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+# 1.5 Nettoyage des tâches BITS corrompues
+Write-Host "Nettoyage des files d'attente BITS..."
+Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue | Remove-BitsTransfer -ErrorAction SilentlyContinue
+
+# 2. Sécurisation et renommage du cache
+Write-Host "Renommage des dossiers de cache..."
+$Paths = @(
+    @{ Original = "$env:windir\SoftwareDistribution"; Backup = "$env:windir\SoftwareDistribution.old" },
+    @{ Original = "$env:windir\System32\catroot2"; Backup = "$env:windir\System32\catroot2.old" }
+)
+
+foreach ($Path in $Paths) {
+    if (Test-Path $Path.Original) {
+        if (Test-Path $Path.Backup) { Remove-Item -Path $Path.Backup -Recurse -Force -ErrorAction SilentlyContinue }
+        
+        Rename-Item -Path $Path.Original -NewName (Split-Path $Path.Backup -Leaf) -Force -ErrorAction SilentlyContinue
+        Write-Host "Dossier $($Path.Original) renommé en .old."
+    }
+}
+
+# 3. Réparation de l'image système (DISM)
+Write-Host "Lancement de DISM (Restauration de l'image)... Cela peut prendre 5-15 min."
+& dism.exe /Online /Cleanup-Image /RestoreHealth
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "DISM terminé avec succès."
+} else {
+    Write-Warning "Échec de DISM (Code d'erreur : $LASTEXITCODE). Le système est peut-être lourdement corrompu."
+}
+
+# 4. Vérification des fichiers système (SFC)
+Write-Host "Lancement de SFC /scannow..."
+& sfc.exe /scannow
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "SFC terminé avec succès sans erreur résiduelle."
+} else {
+    Write-Warning "SFC a rencontré des erreurs ou nécessité un redémarrage (Code : $LASTEXITCODE)."
+}
+
+# 5. Redémarrage des services
+Write-Host "Redémarrage des services..."
+foreach ($Service in $Services) {
+    Start-Service -Name $Service -ErrorAction SilentlyContinue
+}
+
+# 6. Forcer un nouveau cycle de détection
+Write-Host "Déclenchement d'une nouvelle recherche de mises à jour..."
+if (Get-Command "usoclient" -ErrorAction SilentlyContinue) {
+    & usoclient.exe StartInteractiveScan
+    Write-Host "Scan lancé via UsoClient."
+} else {
+    try {
+        (New-Object -ComObject Microsoft.Update.AutoUpdate).DetectNow()
+        Write-Host "Scan lancé via l'objet COM."
+    } catch {
+        Write-Warning "Impossible de déclencher le scan via l'objet COM."
+    }
+}
+
+Write-Host "--- Opération terminée ---"
