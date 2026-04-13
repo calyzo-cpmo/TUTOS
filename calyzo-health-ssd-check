@@ -1,0 +1,58 @@
+<#
+.DESCRIPTION
+    Audit SSD et Batterie pour Datto RMM.
+    Version corrigée et fiabilisée pour contourner les limites WMI classiques.
+    Auteur : Frédéric AFONSO - CALYZO
+#>
+
+# 1. Audit du SSD (Usure)
+try {
+    # On cible explicitement les SSD et on passe l'objet au compteur
+    $SSD = Get-PhysicalDisk -MediaType SSD -ErrorAction Stop | Get-StorageReliabilityCounter -ErrorAction Stop | Select-Object -First 1
+    
+    if ($SSD.Wear -ne $null) {
+        # 'Wear' renvoie un entier. 0 = neuf.
+        $WearLevel = "$($SSD.Wear)%"
+    } else {
+        $WearLevel = "N/A"
+    }
+} catch {
+    $WearLevel = "Non supporté"
+}
+
+# 2. Audit de la Batterie (Méthode profonde root\wmi)
+try {
+    # Sur un PC fixe, ces requêtes vont échouer et passer dans le catch directement
+    $BatStatic = Get-CimInstance -Namespace "root\wmi" -ClassName BatteryStaticData -ErrorAction Stop
+    $BatFull   = Get-CimInstance -Namespace "root\wmi" -ClassName BatteryFullChargedCapacity -ErrorAction Stop
+
+    if ($BatStatic -and $BatFull) {
+        $Design = $BatStatic.DesignedCapacity
+        $Full = $BatFull.FullChargedCapacity
+        
+        if ($Design -gt 0) {
+            $HealthNum = [math]::Round(($Full / $Design) * 100)
+            
+            # Sécurité : Certaines batteries neuves chargent à 101% ou 102% de leur capacité d'usine
+            if ($HealthNum -gt 100) { $HealthNum = 100 }
+            
+            $Health = "$HealthNum%"
+        } else {
+            $Health = "N/A"
+        }
+    } else {
+        $Health = "N/A"
+    }
+} catch {
+    $Health = "N/A (Pas de batterie)"
+}
+
+# 3. Remontée vers Datto RMM (Custom Fields)
+Write-Host "SSD Wear Level : $WearLevel"
+Write-Host "Battery Health : $Health"
+
+# On s'assure de ne pas envoyer un '%' en double pour la batterie
+Write-Host "<<<Custom Fields>>>SSD_Wear_Level=$WearLevel"
+Write-Host "<<<Custom Fields>>>Battery_Health=$Health"
+
+Write-Host "--- Audit terminé et synchronisé ---"
