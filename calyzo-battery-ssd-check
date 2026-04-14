@@ -1,37 +1,41 @@
 <#
 .DESCRIPTION
-    Audit SSD et Batterie pour Datto RMM - Version V2.2 (Production Ready).
-    Ajout de fallbacks pour les drivers récalcitrants (Intel RST, Modern Standby).
-    Logique scindée pour une meilleure lisibilité.
+    Audit SSD et Batterie pour Datto RMM - Version V3 (The Masterpiece).
+    Cible spécifiquement le SSD hébergeant l'OS (C:) pour éviter les faux positifs multi-disques.
     Auteur : Frédéric AFONSO - CALYZO
 #>
 
-# 1. Audit du SSD (Usure)
+# 1. Audit du SSD Système (Usure)
 try {
-    # On récupère tous les disques physiques une seule fois pour éviter de requêter WMI en boucle
-    $AllDisks = Get-PhysicalDisk -ErrorAction Stop
-
-    # Method A : Windows identifie clairement le disque comme étant un SSD
-    $Disk = $AllDisks | Where-Object { $_.MediaType -eq 'SSD' } | Select-Object -First 1
-
-    # Method B : Fallback (Drivers Intel RST / RAID) qui masquent le MediaType en "Unspecified"
-    if (-not $Disk) {
-        $Disk = $AllDisks | Where-Object { $_.MediaType -eq 'Unspecified' -and $_.BusType -match 'NVMe|SATA' } | Select-Object -First 1
-    }
-
-    # Si on a fini par trouver un disque (via A ou B), on interroge son usure
-    if ($Disk) {
-        $SSD = $Disk | Get-StorageReliabilityCounter -ErrorAction Stop
-        if ($SSD.Wear -ne $null) {
-            $WearLevel = "$($SSD.Wear)%"
-        } else {
-            $WearLevel = "N/A (Compteur masqué par le contrôleur)"
-        }
+    # Vérification de la présence des commandes modernes de stockage
+    if (-not (Get-Command Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
+        $WearLevel = "N/A (OS trop ancien)"
     } else {
-        $WearLevel = "N/A (Aucun SSD détecté)"
+        # On cherche le numéro du disque physique rattaché à la partition C:
+        $SysDrive = Get-Partition -DriveLetter C -ErrorAction SilentlyContinue | Get-Disk -ErrorAction SilentlyContinue
+        
+        if ($SysDrive) {
+            # On cible ce disque spécifiquement
+            $Disk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.DeviceId -eq $SysDrive.Number }
+        } else {
+            # Fallback de sécurité si C: est illisible (ex: disques dynamiques)
+            $Disk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -eq 'SSD' -or ($_.MediaType -eq 'Unspecified' -and $_.BusType -match 'NVMe|SATA') } | Select-Object -First 1
+        }
+
+        # Interrogation du compteur d'usure
+        if ($Disk) {
+            $SSD = $Disk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue
+            if ($SSD -and $SSD.Wear -ne $null) {
+                $WearLevel = "$($SSD.Wear)%"
+            } else {
+                $WearLevel = "N/A (Compteur masqué par contrôleur/RAID)"
+            }
+        } else {
+            $WearLevel = "N/A (Aucun SSD trouvé)"
+        }
     }
 } catch {
-    $WearLevel = "Non supporté (Erreur WMI/Disque)"
+    $WearLevel = "Non supporté (Erreur lecture)"
 }
 
 # 2. Audit de la Batterie (Méthode profonde vs Standard)
@@ -49,7 +53,6 @@ try {
         $BatWin32 = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
         if ($BatWin32) {
             $Design = $BatWin32.DesignCapacity
-            # CORRECTION : La propriété exacte pour Win32_Battery (sans le "d")
             $Full = $BatWin32.FullChargeCapacity 
         }
     }
@@ -59,18 +62,17 @@ try {
         if ($HealthNum -gt 100) { $HealthNum = 100 }
         $Health = "$HealthNum%"
     } else {
-        $Health = "N/A (Hardware bloqué)"
+        $Health = "N/A (Hardware bloqué ou fixe)"
     }
 } catch {
     $Health = "Pas de batterie"
 }
 
-# 3. Remontée vers Datto RMM (Adaptation dynamique)
-# Utilisation de variables d'environnement si configurées dans le composant, sinon noms par défaut
+# 3. Remontée vers Datto RMM
 $UDF_SSD = if ($env:VAR_SSD) { $env:VAR_SSD } else { "SSD_Wear_Level" }
 $UDF_BAT = if ($env:VAR_BAT) { $env:VAR_BAT } else { "Battery_Health" }
 
 Write-Host "<<<Custom Fields>>>$UDF_SSD=$WearLevel"
 Write-Host "<<<Custom Fields>>>$UDF_BAT=$Health"
 
-Write-Host "--- Audit terminé (SSD: $WearLevel | Bat: $Health) ---"
+Write-Host "--- Audit terminé (Disque OS: $WearLevel | Bat: $Health) ---"
