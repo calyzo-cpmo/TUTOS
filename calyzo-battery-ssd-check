@@ -1,58 +1,76 @@
 <#
 .DESCRIPTION
-    Audit SSD et Batterie pour Datto RMM.
-    Version corrigée et fiabilisée pour contourner les limites WMI classiques.
+    Audit SSD et Batterie pour Datto RMM - Version V2.2 (Production Ready).
+    Ajout de fallbacks pour les drivers récalcitrants (Intel RST, Modern Standby).
+    Logique scindée pour une meilleure lisibilité.
     Auteur : Frédéric AFONSO - CALYZO
 #>
 
 # 1. Audit du SSD (Usure)
 try {
-    # On cible explicitement les SSD et on passe l'objet au compteur
-    $SSD = Get-PhysicalDisk -MediaType SSD -ErrorAction Stop | Get-StorageReliabilityCounter -ErrorAction Stop | Select-Object -First 1
-    
-    if ($SSD.Wear -ne $null) {
-        # 'Wear' renvoie un entier. 0 = neuf.
-        $WearLevel = "$($SSD.Wear)%"
+    # On récupère tous les disques physiques une seule fois pour éviter de requêter WMI en boucle
+    $AllDisks = Get-PhysicalDisk -ErrorAction Stop
+
+    # Method A : Windows identifie clairement le disque comme étant un SSD
+    $Disk = $AllDisks | Where-Object { $_.MediaType -eq 'SSD' } | Select-Object -First 1
+
+    # Method B : Fallback (Drivers Intel RST / RAID) qui masquent le MediaType en "Unspecified"
+    if (-not $Disk) {
+        $Disk = $AllDisks | Where-Object { $_.MediaType -eq 'Unspecified' -and $_.BusType -match 'NVMe|SATA' } | Select-Object -First 1
+    }
+
+    # Si on a fini par trouver un disque (via A ou B), on interroge son usure
+    if ($Disk) {
+        $SSD = $Disk | Get-StorageReliabilityCounter -ErrorAction Stop
+        if ($SSD.Wear -ne $null) {
+            $WearLevel = "$($SSD.Wear)%"
+        } else {
+            $WearLevel = "N/A (Compteur masqué par le contrôleur)"
+        }
     } else {
-        $WearLevel = "N/A"
+        $WearLevel = "N/A (Aucun SSD détecté)"
     }
 } catch {
-    $WearLevel = "Non supporté"
+    $WearLevel = "Non supporté (Erreur WMI/Disque)"
 }
 
-# 2. Audit de la Batterie (Méthode profonde root\wmi)
+# 2. Audit de la Batterie (Méthode profonde vs Standard)
 try {
-    # Sur un PC fixe, ces requêtes vont échouer et passer dans le catch directement
-    $BatStatic = Get-CimInstance -Namespace "root\wmi" -ClassName BatteryStaticData -ErrorAction Stop
-    $BatFull   = Get-CimInstance -Namespace "root\wmi" -ClassName BatteryFullChargedCapacity -ErrorAction Stop
+    # Method A : Root/WMI (La plus précise)
+    $BatStatic = Get-CimInstance -Namespace "root\wmi" -ClassName BatteryStaticData -ErrorAction SilentlyContinue
+    $BatFull   = Get-CimInstance -Namespace "root\wmi" -ClassName BatteryFullChargedCapacity -ErrorAction SilentlyContinue
 
     if ($BatStatic -and $BatFull) {
         $Design = $BatStatic.DesignedCapacity
         $Full = $BatFull.FullChargedCapacity
-        
-        if ($Design -gt 0) {
-            $HealthNum = [math]::Round(($Full / $Design) * 100)
-            
-            # Sécurité : Certaines batteries neuves chargent à 101% ou 102% de leur capacité d'usine
-            if ($HealthNum -gt 100) { $HealthNum = 100 }
-            
-            $Health = "$HealthNum%"
-        } else {
-            $Health = "N/A"
+    } 
+    else {
+        # Method B : Fallback sur Win32_Battery (Standard Windows)
+        $BatWin32 = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
+        if ($BatWin32) {
+            $Design = $BatWin32.DesignCapacity
+            # CORRECTION : La propriété exacte pour Win32_Battery (sans le "d")
+            $Full = $BatWin32.FullChargeCapacity 
         }
+    }
+
+    if ($Design -gt 0 -and $Full -gt 0) {
+        $HealthNum = [math]::Round(($Full / $Design) * 100)
+        if ($HealthNum -gt 100) { $HealthNum = 100 }
+        $Health = "$HealthNum%"
     } else {
-        $Health = "N/A"
+        $Health = "N/A (Hardware bloqué)"
     }
 } catch {
-    $Health = "N/A (Pas de batterie)"
+    $Health = "Pas de batterie"
 }
 
-# 3. Remontée vers Datto RMM (Custom Fields)
-Write-Host "SSD Wear Level : $WearLevel"
-Write-Host "Battery Health : $Health"
+# 3. Remontée vers Datto RMM (Adaptation dynamique)
+# Utilisation de variables d'environnement si configurées dans le composant, sinon noms par défaut
+$UDF_SSD = if ($env:VAR_SSD) { $env:VAR_SSD } else { "SSD_Wear_Level" }
+$UDF_BAT = if ($env:VAR_BAT) { $env:VAR_BAT } else { "Battery_Health" }
 
-# On s'assure de ne pas envoyer un '%' en double pour la batterie
-Write-Host "<<<Custom Fields>>>SSD_Wear_Level=$WearLevel"
-Write-Host "<<<Custom Fields>>>Battery_Health=$Health"
+Write-Host "<<<Custom Fields>>>$UDF_SSD=$WearLevel"
+Write-Host "<<<Custom Fields>>>$UDF_BAT=$Health"
 
-Write-Host "--- Audit terminé et synchronisé ---"
+Write-Host "--- Audit terminé (SSD: $WearLevel | Bat: $Health) ---"
