@@ -68,11 +68,18 @@ try {
     $Health = "Pas de batterie"
 }
 
-# 3. Remontée vers Datto RMM
+# =========================
+# 3. Output Datto RMM (Parsing)
+# =========================
+
+# Utilisation de variables d'environnement si configurées dans le composant, sinon noms par défaut
 $UDF_SSD = if ($env:VAR_SSD) { $env:VAR_SSD } else { "SSD_Wear_Level" }
 $UDF_BAT = if ($env:VAR_BAT) { $env:VAR_BAT } else { "Battery_Health" }
 
-Write-Host "<<<Custom Fields>>>$UDF_SSD=$WearLevel"
-Write-Host "<<<Custom Fields>>>$UDF_BAT=$Health"
-
 Write-Host "--- Audit terminé (Disque OS: $WearLevel | Bat: $Health) ---"
+
+# Début du bloc de parsing Datto RMM
+Write-Output "<-Start Result->"
+Write-Output "$UDF_SSD=$WearLevel"
+Write-Output "$UDF_BAT=$Health"
+Write-Output "<-End Result->"
