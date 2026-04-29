@@ -1,11 +1,22 @@
 <#
 .DESCRIPTION
-    Audit SSD et Batterie pour Datto RMM - Version V3 (The Masterpiece).
+    Audit SSD et Batterie pour Datto RMM - Version V4 (Production Ready).
+    Écrit directement dans les UDF via le registre CentraStage.
     Cible spécifiquement le SSD hébergeant l'OS (C:) pour éviter les faux positifs multi-disques.
+    
     Auteur : Frédéric AFONSO - CALYZO
+    Modifié : Alignement avec méthode Datto RMM officielle
+    
+.PARAMETER usrUDF_SSD
+    Numéro de l'UDF pour écrire le niveau d'usure SSD (défaut: 1)
+    
+.PARAMETER usrUDF_BAT
+    Numéro de l'UDF pour écrire la santé batterie (défaut: 2)
 #>
 
-# 1. Audit du SSD Système (Usure)
+# ============================================
+# 1. AUDIT DU SSD SYSTÈME (Usure)
+# ============================================
 try {
     # Vérification de la présence des commandes modernes de stockage
     if (-not (Get-Command Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
@@ -21,7 +32,7 @@ try {
             # Fallback de sécurité si C: est illisible (ex: disques dynamiques)
             $Disk = Get-PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -eq 'SSD' -or ($_.MediaType -eq 'Unspecified' -and $_.BusType -match 'NVMe|SATA') } | Select-Object -First 1
         }
-
+        
         # Interrogation du compteur d'usure
         if ($Disk) {
             $SSD = $Disk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue
@@ -38,25 +49,26 @@ try {
     $WearLevel = "Non supporté (Erreur lecture)"
 }
 
-# 2. Audit de la Batterie (Méthode profonde vs Standard)
+# ============================================
+# 2. AUDIT DE LA BATTERIE
+# ============================================
 try {
-    # Method A : Root/WMI (La plus précise)
+    # Méthode A : Root/WMI (La plus précise)
     $BatStatic = Get-CimInstance -Namespace "root\wmi" -ClassName BatteryStaticData -ErrorAction SilentlyContinue
     $BatFull   = Get-CimInstance -Namespace "root\wmi" -ClassName BatteryFullChargedCapacity -ErrorAction SilentlyContinue
-
+    
     if ($BatStatic -and $BatFull) {
         $Design = $BatStatic.DesignedCapacity
         $Full = $BatFull.FullChargedCapacity
-    } 
-    else {
-        # Method B : Fallback sur Win32_Battery (Standard Windows)
+    } else {
+        # Méthode B : Fallback sur Win32_Battery (Standard Windows)
         $BatWin32 = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
         if ($BatWin32) {
             $Design = $BatWin32.DesignCapacity
             $Full = $BatWin32.FullChargeCapacity 
         }
     }
-
+    
     if ($Design -gt 0 -and $Full -gt 0) {
         $HealthNum = [math]::Round(($Full / $Design) * 100)
         if ($HealthNum -gt 100) { $HealthNum = 100 }
@@ -68,18 +80,53 @@ try {
     $Health = "Pas de batterie"
 }
 
-# =========================
-# 3. Output Datto RMM (Parsing)
-# =========================
+# ============================================
+# 3. ÉCRITURE DANS LES UDF VIA REGISTRE
+# ============================================
 
-# Utilisation de variables d'environnement si configurées dans le composant, sinon noms par défaut
-$UDF_SSD = if ($env:VAR_SSD) { $env:VAR_SSD } else { "SSD_Wear_Level" }
-$UDF_BAT = if ($env:VAR_BAT) { $env:VAR_BAT } else { "Battery_Health" }
+# Récupération des variables d'environnement Datto RMM
+$UDF_SSD_NUM = if ($env:usrUDF_SSD) { $env:usrUDF_SSD } else { 1 }
+$UDF_BAT_NUM = if ($env:usrUDF_BAT) { $env:usrUDF_BAT } else { 2 }
 
-Write-Host "--- Audit terminé (Disque OS: $WearLevel | Bat: $Health) ---"
+Write-Host "========================================"
+Write-Host "Audit SSD et Batterie - Résultats"
+Write-Host "========================================"
+Write-Host "SSD Wear Level: $WearLevel"
+Write-Host "Battery Health: $Health"
+Write-Host "========================================"
 
-# Début du bloc de parsing Datto RMM
-Write-Output "<-Start Result->"
-Write-Output "$UDF_SSD=$WearLevel"
-Write-Output "$UDF_BAT=$Health"
-Write-Output "<-End Result->"
+# Vérification du chemin registre
+$RegPath = "HKLM:\Software\CentraStage"
+if (-not (Test-Path $RegPath)) {
+    Write-Host "⚠ Avertissement: $RegPath n'existe pas"
+}
+
+# Écriture SSD dans l'UDF
+if ($UDF_SSD_NUM -ge 1) {
+    try {
+        Write-Host "✓ Writing SSD to UDF #$UDF_SSD_NUM"
+        New-ItemProperty -Path $RegPath -Name "Custom$UDF_SSD_NUM" -PropertyType String -Value "$WearLevel" -Force | Out-Null
+        Write-Host "✓ SSD écrit avec succès dans Custom$UDF_SSD_NUM"
+    } catch {
+        Write-Host "✗ Erreur écriture SSD: $_"
+    }
+} else {
+    Write-Host "✗ usrUDF_SSD non configurée"
+}
+
+# Écriture Batterie dans l'UDF
+if ($UDF_BAT_NUM -ge 1) {
+    try {
+        Write-Host "✓ Writing Battery to UDF #$UDF_BAT_NUM"
+        New-ItemProperty -Path $RegPath -Name "Custom$UDF_BAT_NUM" -PropertyType String -Value "$Health" -Force | Out-Null
+        Write-Host "✓ Batterie écrite avec succès dans Custom$UDF_BAT_NUM"
+    } catch {
+        Write-Host "✗ Erreur écriture Batterie: $_"
+    }
+} else {
+    Write-Host "✗ usrUDF_BAT non configurée"
+}
+
+Write-Host "========================================"
+Write-Host "Audit terminé"
+Write-Host "========================================"
