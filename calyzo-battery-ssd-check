@@ -8,10 +8,10 @@
     Modifié : Alignement avec méthode Datto RMM officielle
     
 .PARAMETER usrUDF_SSD
-    Numéro de l'UDF pour écrire le niveau d'usure SSD (défaut: 1)
+    Numéro de l'UDF pour écrire le niveau d'usure SSD (défaut: 21)
     
 .PARAMETER usrUDF_BAT
-    Numéro de l'UDF pour écrire la santé batterie (défaut: 2)
+    Numéro de l'UDF pour écrire la santé batterie (défaut: 22)
 #>
 
 # ============================================
@@ -85,8 +85,8 @@ try {
 # ============================================
 
 # Récupération des variables d'environnement Datto RMM
-$UDF_SSD_NUM = if ($env:usrUDF_SSD) { $env:usrUDF_SSD } else { 1 }
-$UDF_BAT_NUM = if ($env:usrUDF_BAT) { $env:usrUDF_BAT } else { 2 }
+$UDF_SSD_NUM = if ($env:usrUDF_SSD) { $env:usrUDF_SSD } else { 21 }
+$UDF_BAT_NUM = if ($env:usrUDF_BAT) { $env:usrUDF_BAT } else { 22 }
 
 Write-Host "========================================"
 Write-Host "Audit SSD et Batterie - Résultats"
